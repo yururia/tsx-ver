@@ -1,0 +1,438 @@
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const { query, transaction } = require('../config/database');
+const JWTUtil = require('../utils/jwt');
+const logger = require('../utils/logger');
+
+/**
+ * 認証サービス
+ */
+class AuthService {
+  /**
+   * [完全版] ユーザーログイン (学生ID対応)
+   */
+  static async login(email, password) {
+    try {
+      logger.info('ログイン試行', { email });
+
+      const users = await query(
+        'SELECT * FROM users WHERE email = ?',
+        [email]
+      );
+
+      if (users.length === 0) {
+        logger.warn('ログイン失敗 - ユーザーが見つかりません', { email });
+        return {
+          success: false,
+          message: 'メールアドレスまたはパスワードが正しくありません'
+        };
+      }
+
+      const user = users[0];
+
+      const isPasswordValid = await bcrypt.compare(password, user.password);
+      if (!isPasswordValid) {
+        logger.warn('ログイン失敗 - パスワードが一致しません', { email });
+        return {
+          success: false,
+          message: 'メールアドレスまたはパスワードが正しくありません'
+        };
+      }
+
+      let studentId = user.student_id;
+      let tokenPayload = {
+        id: user.id,
+        email: user.email,
+        role: user.role
+      };
+
+      if (user.role === 'student') {
+        if (!studentId) {
+          const studentInfo = await query(
+            'SELECT student_id FROM students WHERE email = ?',
+            [user.email]
+          );
+          if (studentInfo.length > 0) {
+            studentId = studentInfo[0].student_id;
+          } else {
+            logger.warn('学生ユーザーの学生情報が見つかりません', { email });
+          }
+        }
+
+        if (studentId) {
+          tokenPayload.student_id = studentId;
+        }
+      }
+
+      const token = JWTUtil.generateToken(tokenPayload);
+
+      logger.info('ログイン成功', {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        studentId: studentId
+      });
+
+      return {
+        success: true,
+        message: 'ログインに成功しました',
+        data: {
+          token,
+          user: {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            employeeId: user.employee_id,
+            studentId: studentId,
+            department: user.department,
+            role: user.role
+          }
+        }
+      };
+    } catch (error) {
+      logger.error('ログインエラー:', error.message);
+      return {
+        success: false,
+        message: 'サーバーエラーが発生しました'
+      };
+    }
+  }
+
+  /**
+   * [完全版] ユーザー新規登録 (学生ID対応)
+   */
+  static async register(userData) {
+    try {
+      logger.info('新規登録試行', { email: userData.email, role: userData.role });
+
+      const existingEmail = await query(
+        'SELECT id FROM users WHERE email = ?',
+        [userData.email]
+      );
+
+      if (existingEmail.length > 0) {
+        return {
+          success: false,
+          message: 'このメールアドレスは既に使用されています'
+        };
+      }
+
+      const role = userData.role || 'employee';
+      if (role !== 'employee' && role !== 'student') {
+        return {
+          success: false,
+          message: '無効な役割が指定されました'
+        };
+      }
+
+      let employeeId = null;
+      let studentId = null;
+      let department = userData.department || null;
+
+      if (role === 'employee') {
+        if (!userData.employeeId) {
+          return {
+            success: false,
+            message: '社員IDが必要です'
+          };
+        }
+        employeeId = userData.employeeId;
+        const existingEmployeeId = await query(
+          'SELECT id FROM users WHERE employee_id = ?',
+          [employeeId]
+        );
+
+        if (existingEmployeeId.length > 0) {
+          return {
+            success: false,
+            message: 'この社員IDは既に使用されています'
+          };
+        }
+      } else if (role === 'student') {
+        if (!userData.studentId) {
+          return {
+            success: false,
+            message: '学生IDが必要です'
+          };
+        }
+        studentId = userData.studentId;
+        const existingStudentId = await query(
+          'SELECT student_id FROM students WHERE student_id = ?',
+          [studentId]
+        );
+
+        if (existingStudentId.length > 0) {
+          return {
+            success: false,
+            message: 'この学生IDは既に使用されています'
+          };
+        }
+        employeeId = null;
+        department = null;
+      }
+
+      const hashedPassword = await bcrypt.hash(userData.password, 10);
+
+      const result = await transaction(async (connection) => {
+        const [userResult] = await connection.execute(
+          'INSERT INTO users (name, email, password, employee_id, student_id, department, role) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [
+            userData.name,
+            userData.email,
+            hashedPassword,
+            employeeId,
+            studentId,
+            department,
+            role
+          ]
+        );
+
+        const userId = userResult.insertId;
+
+        if (role === 'student') {
+          await connection.execute(
+            'INSERT INTO students (student_id, name, email, status) VALUES (?, ?, ?, ?)',
+            [
+              studentId,
+              userData.name,
+              userData.email,
+              'active'
+            ]
+          );
+        }
+
+        return { userId, role };
+      });
+
+      const token = JWTUtil.generateToken({
+        id: result.userId,
+        email: userData.email,
+        role: result.role,
+        student_id: studentId
+      });
+
+      logger.info('新規登録成功', {
+        userId: result.userId,
+        if(user.role === 'student') {
+        if (payload.student_id && payload.student_id !== user.student_id) {
+          logger.warn('トークンの学生IDとDBの学生IDが不一致です', { userId: payload.id });
+          return null;
+        }
+        studentId = payload.student_id || user.student_id;
+      }
+
+      return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        employeeId: user.employee_id,
+        studentId: studentId, // student_idを返す
+        department: user.department,
+        role: user.role
+      };
+    } catch (error) {
+      logger.warn('トークン検証エラー:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * パスワード変更
+   */
+  static async changePassword(userId, currentPassword, newPassword) {
+    try {
+      const users = await query(
+        'SELECT password FROM users WHERE id = ?',
+        [userId]
+      );
+
+      if (users.length === 0) {
+        return {
+          success: false,
+          message: 'ユーザーが見つかりません'
+        };
+      }
+
+      const user = users[0];
+
+      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+      if (!isCurrentPasswordValid) {
+        return {
+          success: false,
+          message: '現在のパスワードが正しくありません'
+        };
+      }
+
+      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+      await query(
+        'UPDATE users SET password = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [hashedNewPassword, userId]
+      );
+
+      logger.info('パスワード変更成功', { userId });
+
+      return {
+        success: true,
+        message: 'パスワードが変更されました'
+      };
+    } catch (error) {
+      logger.error('パスワード変更エラー:', error.message);
+      return {
+        success: false,
+        message: 'サーバーエラーが発生しました'
+      };
+    }
+  }
+
+  /**
+   * ユーザー情報更新
+   */
+  static async updateProfile(userId, updateData) {
+    try {
+      const allowedFields = ['name', 'email', 'department'];
+      const updateFields = [];
+      const updateValues = [];
+
+      for (const field of allowedFields) {
+        if (updateData[field] !== undefined) {
+          updateFields.push(`${field} = ?`);
+          updateValues.push(updateData[field]);
+        }
+      }
+
+      if (updateFields.length === 0) {
+        return {
+          success: false,
+          message: '更新するデータがありません'
+        };
+      }
+
+      if (updateData.email) {
+        const existingEmail = await query(
+          'SELECT id FROM users WHERE email = ? AND id != ?',
+          [updateData.email, userId]
+        );
+
+        if (existingEmail.length > 0) {
+          return {
+            success: false,
+            message: 'このメールアドレスは既に使用されています'
+          };
+        }
+      }
+
+      updateValues.push(userId);
+
+      await query(
+        `UPDATE users SET ${updateFields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        updateValues
+      );
+
+      logger.info('プロフィール更新成功', { userId });
+
+      return {
+        success: true,
+        message: 'プロフィールが更新されました'
+      };
+    } catch (error) {
+      logger.error('プロフィール更新エラー:', error.message);
+      return {
+        success: false,
+        message: 'サーバーエラーが発生しました'
+      };
+    }
+  }
+
+  /**
+   * パスワードリセット要求 (トークン生成)
+   */
+  static async forgotPassword(email) {
+    try {
+      const users = await query(
+        'SELECT id FROM users WHERE email = ?',
+        [email]
+      );
+
+      if (users.length === 0) {
+        // セキュリティのため、ユーザーが存在しなくても成功を返す（列挙攻撃防止）
+        // ただし、ログには記録する
+        logger.info('パスワードリセット要求 - ユーザー不在', { email });
+        return {
+          success: true,
+          message: 'パスワードリセットの手順をメールで送信しました'
+        };
+      }
+
+      const user = users[0];
+
+      // トークン生成
+      const token = crypto.randomBytes(32).toString('hex');
+      const expires = new Date(Date.now() + 3600000); // 1時間後
+
+      await query(
+        'UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?',
+        [token, expires, user.id]
+      );
+
+      // 開発環境用: ログにリンクを出力
+      const resetLink = `http://localhost:3000/reset-password?token=${token}`;
+      logger.info('パスワードリセットリンク生成', { email, resetLink });
+
+      // 本番環境ではここでメール送信処理を行う
+
+      return {
+        success: true,
+        message: 'パスワードリセットの手順をメールで送信しました'
+      };
+    } catch (error) {
+      logger.error('パスワードリセット要求エラー:', error.message);
+      return {
+        success: false,
+        message: 'サーバーエラーが発生しました'
+      };
+    }
+  }
+
+  /**
+   * パスワードリセット実行
+   */
+  static async resetPassword(token, newPassword) {
+    try {
+      const users = await query(
+        'SELECT id FROM users WHERE reset_token = ? AND reset_token_expires > NOW()',
+        [token]
+      );
+
+      if (users.length === 0) {
+        return {
+          success: false,
+          message: 'パスワードリセットトークンが無効か、期限切れです'
+        };
+      }
+
+      const user = users[0];
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+      await query(
+        'UPDATE users SET password = ?, reset_token = NULL, reset_token_expires = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [hashedPassword, user.id]
+      );
+
+      logger.info('パスワードリセット成功', { userId: user.id });
+
+      return {
+        success: true,
+        message: 'パスワードが再設定されました'
+      };
+    } catch (error) {
+      logger.error('パスワードリセット実行エラー:', error.message);
+      return {
+        success: false,
+        message: 'サーバーエラーが発生しました'
+      };
+    }
+  }
+}
+
+module.exports = AuthService;
