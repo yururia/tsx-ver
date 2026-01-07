@@ -60,6 +60,7 @@ try {
   const timetableRoutes = loadRoute('Timetable', './routes/timetables');
   const attendanceStatsRoutes = loadRoute('Attendance Stats', './routes/attendance-stats');
   const invitationRoutes = loadRoute('Invitation', './routes/invitations');
+  const attendanceV2Routes = loadRoute('Attendance V2', './routes/attendance-v2');
 
   log('\n✅ 全ルートの読み込み完了\n');
 
@@ -125,6 +126,8 @@ try {
   app.use('/api/approvals', approvalRoutes);
   app.use('/api/timetables', timetableRoutes);
   app.use('/api/invitations', invitationRoutes);
+  // V2 API (新スキーマ対応)
+  app.use('/api/v2/attendance', attendanceV2Routes);
 
 
   // --- 404ハンドラ ---
