@@ -18,6 +18,14 @@ router.get('/', authenticate, [
     .optional()
     .isISO8601()
     .withMessage('終了日は有効な日付形式で入力してください'),
+  query('start_date')
+    .optional()
+    .isISO8601()
+    .withMessage('開始日は有効な日付形式で入力してください'),
+  query('end_date')
+    .optional()
+    .isISO8601()
+    .withMessage('終了日は有効な日付形式で入力してください'),
   query('isPublic')
     .optional()
     .isBoolean()
@@ -41,15 +49,27 @@ router.get('/', authenticate, [
       });
     }
 
-    const { startDate, endDate, isPublic, limit, offset } = req.query;
+    const { startDate, endDate, isPublic, limit, offset, start_date, end_date } = req.query;
+
+    logger.debug('イベント取得リクエスト:', {
+      query: req.query,
+      userId: req.user.id,
+      resolvedStartDate: startDate || start_date,
+      resolvedEndDate: endDate || end_date
+    });
 
     const result = await EventService.getEvents({
       userId: req.user.id,
-      startDate,
-      endDate,
+      startDate: startDate || start_date,
+      endDate: endDate || end_date,
       isPublic: isPublic === 'true' ? true : (isPublic === 'false' ? false : undefined),
       limit: limit ? parseInt(limit) : null,
       offset: offset ? parseInt(offset) : 0
+    });
+
+    logger.debug('イベント取得結果:', {
+      success: result.success,
+      eventCount: result.data?.events?.length || 0
     });
 
     if (result.success) {

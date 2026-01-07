@@ -28,7 +28,7 @@ const CalendarPage: React.FC<CalendarPageProps> = React.memo(({ isDashboardMode 
   const [showAbsenceList, setShowAbsenceList] = useState<boolean>(false);
   const [absenceData, setAbsenceData] = useState<any>(null);
 
-  const loadCalendarData = useCallback(async() => {
+  const loadCalendarData = useCallback(async () => {
     try {
       console.log('[CalendarPage] loadCalendarData started. User:', user?.id);
       if (!isAuthenticated || !user?.id) {
@@ -80,14 +80,24 @@ const CalendarPage: React.FC<CalendarPageProps> = React.memo(({ isDashboardMode 
         const eventList = (eventResponse.data && Array.isArray((eventResponse.data as any).events))
           ? (eventResponse.data as any).events
           : [];
+        console.log('[Calendar Debug] Received events:', eventList);
         const eventsMap: Record<string, any[]> = {};
         eventList.forEach((event) => {
-          const eventDate = event.start_date.split('T')[0];
-          if (!eventsMap[eventDate]) {
+          // MySQL形式（YYYY-MM-DD HH:MM:SS）とISO形式（YYYY-MM-DDTHH:MM:SS）の両方に対応
+          let eventDate = event.start_date;
+          if (eventDate) {
+            // YYYY-MM-DD部分のみを抽出
+            eventDate = eventDate.split('T')[0].split(' ')[0];
+          }
+          console.log('[Calendar Debug] Event date:', eventDate, 'for event:', event.title);
+          if (eventDate && !eventsMap[eventDate]) {
             eventsMap[eventDate] = [];
           }
-          eventsMap[eventDate].push(event);
+          if (eventDate) {
+            eventsMap[eventDate].push(event);
+          }
         });
+        console.log('[Calendar Debug] Events map:', eventsMap);
         setEvents(eventsMap);
       } else {
         throw new Error(eventResponse?.message || 'イベントデータの取得に失敗しました');
@@ -164,7 +174,7 @@ const CalendarPage: React.FC<CalendarPageProps> = React.memo(({ isDashboardMode 
     setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
   };
 
-  const handleExport = async() => {
+  const handleExport = async () => {
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth() + 1;
     const startDate = new Date(year, month - 1, 1).toISOString().split('T')[0];
@@ -203,7 +213,7 @@ const CalendarPage: React.FC<CalendarPageProps> = React.memo(({ isDashboardMode 
   };
 
   // [追加] 日付クリックハンドラー (教員のみ)
-  const handleDateClick = async(date?: Date) => {
+  const handleDateClick = async (date?: Date) => {
     console.log('=== [Calendar] Left-click detected ===');
     console.log('[Calendar] user.role:', user?.role);
     console.log('[Calendar] date:', date);
@@ -236,7 +246,7 @@ const CalendarPage: React.FC<CalendarPageProps> = React.memo(({ isDashboardMode 
   };
 
   // [追加] 欠席申請送信
-  const handleAbsenceSubmit = async(formData: any) => {
+  const handleAbsenceSubmit = async (formData: any) => {
     try {
       console.log('[Calendar Debug] Submitting absence request:', formData);
       const response = await attendanceApi.submitAbsenceRequest(formData);

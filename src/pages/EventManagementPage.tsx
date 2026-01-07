@@ -60,15 +60,14 @@ const EventManagementPage: React.FC = React.memo(() => {
     participant_ids: [],
   });
 
-  const loadEvents = useCallback(async() => {
+  const loadEvents = useCallback(async () => {
     try {
       setIsLoading(true);
       setError(null);
 
       const response = await attendanceApi.getEvents({
-        startDate: dateFilter.startDate ? new Date(dateFilter.startDate).toISOString() : null,
-        endDate: dateFilter.endDate ? new Date(dateFilter.endDate).toISOString() : null,
-        limit: 0,
+        startDate: dateFilter.startDate ? new Date(dateFilter.startDate).toISOString() : undefined,
+        endDate: dateFilter.endDate ? new Date(dateFilter.endDate).toISOString() : undefined,
       });
 
       if (response.success) {
@@ -109,7 +108,7 @@ const EventManagementPage: React.FC = React.memo(() => {
     }));
   }, []);
 
-  const handleSubmit = useCallback(async(e: React.FormEvent) => {
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
 
     try {
@@ -173,7 +172,7 @@ const EventManagementPage: React.FC = React.memo(() => {
     setShowForm(true);
   }, []);
 
-  const handleDelete = useCallback(async(eventId: number) => {
+  const handleDelete = useCallback(async (eventId: number) => {
     if (!window.confirm('このイベントを削除しますか？')) {
       return;
     }
@@ -203,7 +202,7 @@ const EventManagementPage: React.FC = React.memo(() => {
     }
   }, [loadEvents]);
 
-  const handleParticipate = useCallback(async(eventId: number, status: string) => {
+  const handleParticipate = useCallback(async (eventId: number, status: string) => {
     try {
       setIsLoading(true);
       setError(null);
@@ -229,7 +228,7 @@ const EventManagementPage: React.FC = React.memo(() => {
     }
   }, [loadEvents]);
 
-  const handleViewEvent = useCallback(async(eventId: number) => {
+  const handleViewEvent = useCallback(async (eventId: number) => {
     try {
       const response = await attendanceApi.getEvent(eventId);
       if (response.success) {

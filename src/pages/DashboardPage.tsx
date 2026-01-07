@@ -233,7 +233,7 @@ const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({ user }) => {
   }
 
   return (
-    <div className="dashboard-page">
+    <div className="dashboard-page" key={`dashboard-${user?.id}`}>
       <div className="dashboard-container">
         <div className="dashboard-header">
           <h1 className="dashboard-title">ダッシュボード</h1>
@@ -349,7 +349,7 @@ const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({ user }) => {
             <h2 className="card-title">出欠カレンダー</h2>
             <div className="calendar-wrapper">
               {/* @ts-ignore: CalendarPage is still JS */}
-              <CalendarPage isDashboardMode={true} />
+              <CalendarPage isDashboardMode={true} key={`calendar-${user?.id}`} />
             </div>
           </div>
 

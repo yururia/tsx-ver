@@ -28,6 +28,23 @@ class EventService {
         };
       }
 
+      // ISO 8601形式の日時をMySQL形式に変換
+      const formatDateForMySQL = (dateStr) => {
+        if (!dateStr) return null;
+        const date = new Date(dateStr);
+        // YYYY-MM-DD HH:MM:SS 形式に変換
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+      };
+
+      const formattedStartDate = formatDateForMySQL(start_date);
+      const formattedEndDate = end_date ? formatDateForMySQL(end_date) : null;
+
       const result = await transaction(async (connection) => {
         // イベントの作成
         const [eventResult] = await connection.execute(
@@ -36,8 +53,8 @@ class EventService {
           [
             title,
             description || null,
-            start_date,
-            end_date || null,
+            formattedStartDate,
+            formattedEndDate,
             location || null,
             created_by,
             Boolean(is_public)
@@ -75,10 +92,19 @@ class EventService {
         }
       };
     } catch (error) {
-      logger.error('イベント作成エラー:', error.message);
+      logger.error('イベント作成エラー:', {
+        eventData: {
+          title: eventData?.title,
+          start_date: eventData?.start_date,
+          end_date: eventData?.end_date,
+          created_by: eventData?.created_by
+        },
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
       return {
         success: false,
-        message: 'イベントの作成に失敗しました'
+        message: error.message || 'イベントの作成に失敗しました'
       };
     }
   }

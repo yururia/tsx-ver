@@ -125,11 +125,19 @@ class GroupService {
         // プレースホルダーの生成 (?,?,...)
         const placeholders = groupIds.map(() => '?').join(',');
 
+        // studentsテーブルとusersテーブルの両方からメンバー情報を取得
         const allMembers = await query(
-          `SELECT gm.id, gm.group_id, s.student_id, s.name, gm.status, gm.joined_at 
-            FROM group_members gm
-            JOIN students s ON gm.student_id = s.student_id
-            WHERE gm.group_id IN (${placeholders})`,
+          `SELECT 
+            gm.id, 
+            gm.group_id, 
+            gm.student_id, 
+            COALESCE(s.name, u.name, gm.student_id) as name, 
+            gm.status, 
+            gm.joined_at 
+          FROM group_members gm
+          LEFT JOIN students s ON gm.student_id = s.student_id
+          LEFT JOIN users u ON gm.student_id = u.student_id
+          WHERE gm.group_id IN (${placeholders})`,
           groupIds
         );
 
@@ -189,11 +197,17 @@ class GroupService {
 
       const group = groups[0];
 
+      // studentsテーブルとusersテーブルの両方からメンバー情報を取得
       const members = await query(
-        `SELECT s.student_id, s.name, gm.status, gm.joined_at 
-          FROM group_members gm
-          JOIN students s ON gm.student_id = s.student_id
-          WHERE gm.group_id = ?`,
+        `SELECT 
+          gm.student_id, 
+          COALESCE(s.name, u.name, gm.student_id) as name, 
+          gm.status, 
+          gm.joined_at 
+        FROM group_members gm
+        LEFT JOIN students s ON gm.student_id = s.student_id
+        LEFT JOIN users u ON gm.student_id = u.student_id
+        WHERE gm.group_id = ?`,
         [id]
       );
       group.members = members;
@@ -266,8 +280,13 @@ class GroupService {
         const groups = await query('SELECT id FROM `groups` WHERE id = ?', [id], conn);
         if (groups.length === 0) throw new Error('グループが見つかりません');
 
+        // studentsテーブルとusersテーブルの両方を確認
         const students = await query('SELECT student_id FROM students WHERE student_id = ?', [studentId], conn);
-        if (students.length === 0) throw new Error('学生が見つかりません');
+        const usersWithStudentId = await query('SELECT student_id FROM users WHERE student_id = ?', [studentId], conn);
+
+        if (students.length === 0 && usersWithStudentId.length === 0) {
+          throw new Error(`学生が見つかりません (student_id: ${studentId})`);
+        }
 
         const existingMember = await query(
           'SELECT group_id FROM group_members WHERE group_id = ? AND student_id = ?',
@@ -295,7 +314,13 @@ class GroupService {
       logger.info('グループメンバー追加成功', { groupId: id, studentId, inviterId });
       return result;
     } catch (error) {
-      logger.error('グループメンバー追加エラー:', error.message);
+      logger.error('グループメンバー追加エラー:', {
+        groupId: id,
+        studentId,
+        inviterId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
       return {
         success: false,
         message: error.message || 'メンバーの追加に失敗しました'
@@ -340,22 +365,30 @@ class GroupService {
    */
   static async getMembers(id, options = {}) {
     try {
-      const { status, limit, offset = 0 } = options; // [修正] 'role' -> 'status'
+      const { status, limit, offset = 0 } = options;
 
+      // studentsテーブルとusersテーブルの両方からメンバー情報を取得
       let sql = `
-        SELECT s.student_id, s.name, s.email, gm.status, gm.joined_at, gm.invited_by
+        SELECT 
+          gm.student_id, 
+          COALESCE(s.name, u.name, gm.student_id) as name, 
+          COALESCE(s.email, u.email, '') as email, 
+          gm.status, 
+          gm.joined_at, 
+          gm.invited_by
         FROM group_members gm
-        JOIN students s ON gm.student_id = s.student_id
+        LEFT JOIN students s ON gm.student_id = s.student_id
+        LEFT JOIN users u ON gm.student_id = u.student_id
         WHERE gm.group_id = ?
       `;
       const params = [id];
 
-      if (status) { // [修正] 'role' -> 'status'
+      if (status) {
         sql += ' AND gm.status = ?';
         params.push(status);
       }
 
-      sql += ' ORDER BY s.name ASC';
+      sql += ' ORDER BY name ASC';
 
       if (limit) {
         sql += ' LIMIT ?';
