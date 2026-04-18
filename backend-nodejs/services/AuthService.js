@@ -16,7 +16,7 @@ class AuthService {
       logger.info('ログイン試行', { email });
 
       const users = await query(
-        'SELECT id, name, email, password, student_id, organization_id, role FROM users WHERE email = ?',
+        'SELECT id, name, email, password, identifier, organization_id, role FROM users WHERE email = ?',
         [email]
       );
 
@@ -39,7 +39,7 @@ class AuthService {
         };
       }
 
-      let studentId = user.student_id;
+      let studentId = user.identifier;
       let tokenPayload = {
         id: user.id,
         email: user.email,
@@ -163,7 +163,7 @@ class AuthService {
 
       // 3. ユーザー作成
       const [userResult] = await connection.query(
-        'INSERT INTO users (name, email, password, role, organization_id, student_id, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+        'INSERT INTO users (name, email, password, role, organization_id, identifier, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
         [name, email, hashedPassword, role, organizationId, studentId]
       );
       const userId = userResult.insertId;
@@ -225,7 +225,7 @@ class AuthService {
       const payload = JWTUtil.verifyToken(token);
 
       const users = await query(
-        'SELECT id, name, email, student_id, organization_id, role FROM users WHERE id = ?',
+        'SELECT id, name, email, identifier, organization_id, role FROM users WHERE id = ?',
         [payload.id]
       );
 
@@ -241,13 +241,13 @@ class AuthService {
         return null;
       }
 
-      let studentId = user.student_id;
+      let studentId = user.identifier;
       if (user.role === 'student') {
-        if (payload.student_id && payload.student_id !== user.student_id) {
+        if (payload.student_id && payload.student_id !== user.identifier) {
           logger.warn('トークンの学生IDとDBの学生IDが不一致です', { userId: payload.id });
           return null;
         }
-        studentId = payload.student_id || user.student_id;
+        studentId = payload.student_id || user.identifier;
       }
 
       return {
@@ -328,7 +328,11 @@ class AuthService {
 
       for (const field of allowedFields) {
         if (updateData[field] !== undefined) {
-          updateFields.push(`${field} = ?`);
+          if (field === 'student_id') {
+            updateFields.push(`identifier = ?`);
+          } else {
+            updateFields.push(`${field} = ?`);
+          }
           updateValues.push(updateData[field]);
           logger.info(`フィールド追加: ${field}`, { value: updateData[field] });
         }
@@ -362,13 +366,13 @@ class AuthService {
         logger.info('メールアドレス重複なし');
       }
 
-      // 学生IDの変更がある場合、重複チェックと整合性確認
+      // 学生IDの変更がある場合、重複チェック
       if (updateData.student_id) {
         logger.info('学生ID更新処理開始', { newStudentId: updateData.student_id });
 
         // 現在のユーザー情報を取得
         const currentUser = await query(
-          'SELECT student_id, role FROM users WHERE id = ?',
+          'SELECT identifier as student_id, role FROM users WHERE id = ?',
           [userId]
         );
 
@@ -377,9 +381,8 @@ class AuthService {
           return { success: false, message: 'ユーザーが見つかりません' };
         }
 
-        const oldStudentId = currentUser[0].student_id;
         const userRole = currentUser[0].role;
-        logger.info('現在のユーザー情報', { oldStudentId, userRole });
+        logger.info('現在のユーザー情報', { userRole });
 
         // 学生ロールの場合のみ学生IDを更新可能
         if (userRole !== 'student') {
@@ -393,7 +396,7 @@ class AuthService {
         // 新しい学生IDが他のユーザーに使われていないかチェック
         logger.info('学生ID重複チェック', { studentId: updateData.student_id });
         const existingStudentId = await query(
-          'SELECT id FROM users WHERE student_id = ? AND id != ?',
+          'SELECT id FROM users WHERE identifier = ? AND id != ?',
           [updateData.student_id, userId]
         );
 
@@ -405,55 +408,6 @@ class AuthService {
           };
         }
         logger.info('学生ID重複なし');
-
-        // studentsテーブルにレコードがあるか確認
-        const existingStudent = await query(
-          'SELECT student_id FROM students WHERE student_id = ?',
-          [updateData.student_id]
-        );
-        logger.info('studentsテーブルチェック', { exists: existingStudent.length > 0 });
-
-        // studentsテーブルに新しいIDのレコードがなければ作成
-        if (existingStudent.length === 0) {
-          // 古いstudent_idのレコードを更新するか、新規作成するか判断
-          if (oldStudentId) {
-            // 古いIDのレコードがあれば更新
-            const oldStudent = await query(
-              'SELECT student_id FROM students WHERE student_id = ?',
-              [oldStudentId]
-            );
-            if (oldStudent.length > 0) {
-              // 古いレコードの学生IDを更新
-              await query(
-                'UPDATE students SET student_id = ?, updated_at = CURRENT_TIMESTAMP WHERE student_id = ?',
-                [updateData.student_id, oldStudentId]
-              );
-              logger.info('studentsテーブルの学生ID更新', { oldStudentId, newStudentId: updateData.student_id });
-            } else {
-              // 古いレコードがなければ新規作成
-              const userInfo = await query(
-                'SELECT name FROM users WHERE id = ?',
-                [userId]
-              );
-              await query(
-                'INSERT INTO students (student_id, name, status, created_at) VALUES (?, ?, ?, NOW())',
-                [updateData.student_id, userInfo[0].name, 'active']
-              );
-              logger.info('studentsテーブルに新規レコード作成', { studentId: updateData.student_id });
-            }
-          } else {
-            // 古いIDがなければ新規作成
-            const userInfo = await query(
-              'SELECT name FROM users WHERE id = ?',
-              [userId]
-            );
-            await query(
-              'INSERT INTO students (student_id, name, status, created_at) VALUES (?, ?, ?, NOW())',
-              [updateData.student_id, userInfo[0].name, 'active']
-            );
-            logger.info('studentsテーブルに新規レコード作成', { studentId: updateData.student_id });
-          }
-        }
       }
 
       updateValues.push(userId);

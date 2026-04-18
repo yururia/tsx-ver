@@ -11,7 +11,7 @@ class UserService {
    */
   static async getAllUsers(organizationId) {
     try {
-      let sql = 'SELECT id, name, email, student_id, organization_id, role, created_at FROM users';
+      let sql = 'SELECT id, name, email, identifier as student_id, organization_id, role, created_at FROM users';
       const params = [];
 
       if (organizationId) {
@@ -42,7 +42,7 @@ class UserService {
   static async getUser(userId) {
     try {
       const users = await query(
-        'SELECT id, name, email, student_id, organization_id, role, created_at, last_role_update FROM users WHERE id = ?',
+        'SELECT id, name, email, identifier as student_id, organization_id, role, created_at, last_role_update FROM users WHERE id = ?',
         [userId]
       );
 
@@ -98,7 +98,7 @@ class UserService {
         if (updateData.student_id) {
           logger.info('学生ID重複チェック', { student_id: updateData.student_id });
           const existingStudentId = await query(
-            'SELECT id FROM users WHERE student_id = ? AND id != ?',
+            'SELECT id FROM users WHERE identifier = ? AND id != ?',
             [updateData.student_id, userId]
           );
 
@@ -110,7 +110,11 @@ class UserService {
 
         for (const field of allowedFields) {
           if (updateData[field] !== undefined) {
-            updateFields.push(`${field} = ?`);
+            if (field === 'student_id') {
+              updateFields.push(`identifier = ?`);
+            } else {
+              updateFields.push(`${field} = ?`);
+            }
             updateValues.push(updateData[field]);
             logger.info(`フィールド追加: ${field}`, { value: updateData[field] });
           }
@@ -259,7 +263,7 @@ class UserService {
 
         if (newRole !== 'student') {
           await conn.execute(
-            'UPDATE users SET student_id = NULL WHERE id = ?',
+            'UPDATE users SET identifier = NULL WHERE id = ?',
             [userId]
           );
         }

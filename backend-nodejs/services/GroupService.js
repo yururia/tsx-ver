@@ -1,3 +1,13 @@
+/**
+ * グループ管理サービス
+ *
+ * 責務:
+ *   - グループ（クラス・チーム等）の CRUD
+ *   - グループメンバー（招待・承諾・削除）管理
+ *   - 担当教員の紐付け管理
+ *
+ * テーブル: groups / group_members / group_teachers / users
+ */
 const { query, transaction } = require('../config/database');
 const logger = require('../utils/logger');
 
@@ -81,7 +91,10 @@ class GroupService {
       const params = [];
 
       if (student_id) {
-        sql += ` JOIN group_members gm_filter ON g.id = gm_filter.group_id WHERE gm_filter.student_id = ?`;
+        // student_id (identifier) から user_id を特定してフィルタリング
+        sql += ` JOIN group_members gm_filter ON g.id = gm_filter.group_id 
+                 JOIN users u_filter ON gm_filter.user_id = u_filter.id 
+                 WHERE u_filter.identifier = ?`;
         params.push(student_id);
       } else if (options.teacher_id) { // [追加] 担当教員でフィルタリング
         sql += ` JOIN group_teachers gt_filter ON g.id = gt_filter.group_id WHERE gt_filter.user_id = ?`;
@@ -125,18 +138,18 @@ class GroupService {
         // プレースホルダーの生成 (?,?,...)
         const placeholders = groupIds.map(() => '?').join(',');
 
-        // studentsテーブルとusersテーブルの両方からメンバー情報を取得
+        // usersテーブルからメンバー情報を取得
         const allMembers = await query(
           `SELECT 
             gm.id, 
             gm.group_id, 
-            gm.student_id, 
-            COALESCE(s.name, u.name, gm.student_id) as name, 
+            gm.user_id as student_id_internal,
+            u.identifier as student_id,
+            u.name, 
             gm.status, 
             gm.joined_at 
           FROM group_members gm
-          LEFT JOIN students s ON gm.student_id = s.student_id
-          LEFT JOIN users u ON gm.student_id = u.student_id
+          LEFT JOIN users u ON gm.user_id = u.id
           WHERE gm.group_id IN (${placeholders})`,
           groupIds
         );
@@ -156,11 +169,48 @@ class GroupService {
         }
       }
 
+      // -------------------------------------------------------
+      // ページング前の総件数を独立したカウントSQLで取得する
+      // ⛔ groups.length だと LIMIT 後の件数（例: 10）になり
+      //    ページネーションの計算が誤る
+      // -------------------------------------------------------
+      let countSql = `SELECT COUNT(*) as total FROM \`groups\` g WHERE 1=1`;
+      const countParams = [];
+
+      if (student_id) {
+        countSql += ` AND EXISTS (
+          SELECT 1 FROM group_members gm2
+          JOIN users u2 ON gm2.user_id = u2.id
+          WHERE gm2.group_id = g.id AND u2.identifier = ?)`;
+        countParams.push(student_id);
+      } else if (options.teacher_id) {
+        countSql += ` AND EXISTS (
+          SELECT 1 FROM group_teachers gt2
+          WHERE gt2.group_id = g.id AND gt2.user_id = ?)`;
+        countParams.push(options.teacher_id);
+      }
+
+      if (search) {
+        countSql += ' AND g.name LIKE ?';
+        countParams.push(`%${search}%`);
+      }
+      if (is_active !== undefined) {
+        countSql += ' AND g.is_active = ?';
+        countParams.push(Boolean(is_active));
+      }
+      if (created_by) {
+        countSql += ' AND g.created_by = ?';
+        countParams.push(created_by);
+      }
+
+      const countResult = await query(countSql, countParams);
+      const totalCount = countResult[0]?.total || 0;
+
       return {
         success: true,
         data: {
           groups,
-          total: groups.length
+          total: totalCount  // ページング前の全件数
         }
       };
     } catch (error) {
@@ -200,13 +250,14 @@ class GroupService {
       // studentsテーブルとusersテーブルの両方からメンバー情報を取得
       const members = await query(
         `SELECT 
-          gm.student_id, 
-          COALESCE(s.name, u.name, gm.student_id) as name, 
+          gm.id, 
+          gm.group_id, 
+          u.identifier as student_id, 
+          u.name, 
           gm.status, 
           gm.joined_at 
         FROM group_members gm
-        LEFT JOIN students s ON gm.student_id = s.student_id
-        LEFT JOIN users u ON gm.student_id = u.student_id
+        LEFT JOIN users u ON gm.user_id = u.id
         WHERE gm.group_id = ?`,
         [id]
       );
@@ -274,34 +325,46 @@ class GroupService {
    * グループメンバーの追加（招待）
    * [修正] 'role' ではなく 'status' を使う
    */
-  static async addMember(id, studentId, inviterId) {
+  static async addMember(groupId, studentId, inviterId) {
     try {
       const result = await transaction(async (conn) => {
-        const groups = await query('SELECT id FROM `groups` WHERE id = ?', [id], conn);
+        const groups = await query('SELECT id FROM `groups` WHERE id = ?', [groupId], conn);
         if (groups.length === 0) throw new Error('グループが見つかりません');
 
-        // studentsテーブルとusersテーブルの両方を確認
-        const students = await query('SELECT student_id FROM students WHERE student_id = ?', [studentId], conn);
-        const usersWithStudentId = await query('SELECT student_id FROM users WHERE student_id = ?', [studentId], conn);
+        // ユーザーが存在するか確認 (Identifierで検索)
+        const users = await query(
+          'SELECT id, name, email FROM users WHERE identifier = ?',
+          [studentId],
+          conn
+        );
 
-        if (students.length === 0 && usersWithStudentId.length === 0) {
-          throw new Error(`学生が見つかりません (student_id: ${studentId})`);
+        let userId;
+        let userName = '';
+        let userEmail = '';
+
+        if (users.length > 0) {
+          userId = users[0].id;
+          userName = users[0].name;
+          userEmail = users[0].email;
+        } else {
+          throw new Error(`指定された学生ID (${studentId}) が見つかりません`);
         }
 
+        // 既にメンバーかチェック
         const existingMember = await query(
-          'SELECT group_id FROM group_members WHERE group_id = ? AND student_id = ?',
-          [id, studentId],
+          'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?',
+          [groupId, userId],
           conn
         );
 
         if (existingMember.length > 0) {
-          throw new Error('この学生は既にメンバー（または招待済み）です');
+          throw new Error('この学生は既にグループに参加しています');
         }
 
-        // [修正] 'status' を 'pending' で挿入
+        // メンバー追加
         await query(
-          'INSERT INTO group_members (group_id, student_id, invited_by, status) VALUES (?, ?, ?, ?)',
-          [id, studentId, inviterId, 'pending'],
+          'INSERT INTO group_members (group_id, user_id, invited_by, status, joined_at) VALUES (?, ?, ?, ?, NOW())',
+          [groupId, userId, inviterId, 'pending'],
           conn
         );
 
@@ -311,11 +374,11 @@ class GroupService {
         };
       });
 
-      logger.info('グループメンバー追加成功', { groupId: id, studentId, inviterId });
+      logger.info('グループメンバー追加成功', { groupId, studentId, inviterId });
       return result;
     } catch (error) {
       logger.error('グループメンバー追加エラー:', {
-        groupId: id,
+        groupId,
         studentId,
         inviterId,
         errorMessage: error.message,
@@ -337,13 +400,20 @@ class GroupService {
         return { success: false, message: '無効なステータスです' };
       }
 
+      // studentId (identifier) から user_id を取得
+      const users = await query('SELECT id FROM users WHERE identifier = ?', [studentId]);
+      if (users.length === 0) {
+        return { success: false, message: '学生が見つかりません' };
+      }
+      const userId = users[0].id;
+
       const result = await query(
-        'UPDATE group_members SET status = ?, joined_at = ? WHERE group_id = ? AND student_id = ? AND status = ?',
+        'UPDATE group_members SET status = ?, joined_at = ? WHERE group_id = ? AND user_id = ? AND status = ?',
         [
           status,
           (status === 'accepted') ? new Date() : null,
           id,
-          studentId,
+          userId,
           'pending'
         ]
       );
@@ -370,15 +440,14 @@ class GroupService {
       // studentsテーブルとusersテーブルの両方からメンバー情報を取得
       let sql = `
         SELECT 
-          gm.student_id, 
-          COALESCE(s.name, u.name, gm.student_id) as name, 
-          COALESCE(s.email, u.email, '') as email, 
+          u.identifier as student_id, 
+          u.name, 
+          u.email, 
           gm.status, 
           gm.joined_at, 
           gm.invited_by
         FROM group_members gm
-        LEFT JOIN students s ON gm.student_id = s.student_id
-        LEFT JOIN users u ON gm.student_id = u.student_id
+        LEFT JOIN users u ON gm.user_id = u.id
         WHERE gm.group_id = ?
       `;
       const params = [id];
@@ -417,12 +486,17 @@ class GroupService {
   /**
    * グループメンバーの削除
    */
-  static async removeMember(id, studentId) {
+  static async removeMember(groupId, studentId) {
     try {
       const result = await transaction(async (conn) => {
+        // ユーザーIDの取得
+        const users = await query('SELECT id FROM users WHERE identifier = ?', [studentId], conn);
+        if (users.length === 0) throw new Error('学生が見つかりません');
+        const userId = users[0].id;
+
         const existingMember = await query(
-          'SELECT group_id FROM group_members WHERE group_id = ? AND student_id = ?',
-          [id, studentId],
+          'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?',
+          [groupId, userId],
           conn
         );
 
@@ -431,8 +505,8 @@ class GroupService {
         }
 
         await query(
-          'DELETE FROM group_members WHERE group_id = ? AND student_id = ?',
-          [id, studentId],
+          'DELETE FROM group_members WHERE group_id = ? AND user_id = ?',
+          [groupId, userId],
           conn
         );
 

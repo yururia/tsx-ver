@@ -1,11 +1,21 @@
 /**
- * 統合ユーザーサービス (新スキーマ対応)
- * users テーブルを使用した統合ユーザー管理
- * students テーブルのデータも users に統合
+ * 統合ユーザーサービス (v2 スキーマ対応)
+ *
+ * 責務:
+ *   - users テーブルに対する全ユーザー操作（学生・教員・管理者など全ロール統合）
+ *   - 旧 students テーブルは廃止され、役割は identifier カラムで代替
+ *
+ * 重要な設計方針:
+ *   - 全操作は organization_id でテナント分離される
+ *   - パスワードは必要な場合のみ返却する（getUserByEmail の includePassword オプション参照）
+ *   - 一括操作はバルクINSERTで N+1 クエリを回避する
  */
 const { query, transaction } = require('../config/database');
 const logger = require('../utils/logger');
 const bcrypt = require('bcrypt');
+
+/** bcrypt のコストファクター（変更時はハッシュの再生成が必要）*/
+const BCRYPT_ROUNDS = 10;
 
 class UnifiedUserService {
     /**
@@ -47,8 +57,8 @@ class UnifiedUserService {
                 };
             }
 
-            // パスワードハッシュ化
-            const hashedPassword = await bcrypt.hash(password, 10);
+            // パスワードハッシュ化（コストファクターは定数で一元管理）
+            const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
             const result = await query(
                 `INSERT INTO users 
@@ -114,11 +124,25 @@ class UnifiedUserService {
 
     /**
      * ユーザー取得（メールアドレス）
+     *
+     * @param {string} email - メールアドレス
+     * @param {Object} options
+     * @param {boolean} [options.includePassword=false]
+     *   true にするとパスワードハッシュも返す（AuthService での認証時のみ使用すること）
      */
-    static async getUserByEmail(email) {
+    static async getUserByEmail(email, { includePassword = false } = {}) {
         try {
+            // ⚠️ デフォルトはパスワードを除いた安全なカラムのみ返す
+            // 認証処理（AuthService）でのみ includePassword: true を指定する
+            const columns = includePassword
+                ? '*'
+                : `id, organization_id, email, name, role, identifier,
+                   card_id, department, grade, class_name, phone, avatar_url,
+                   is_active, status, enrollment_date, last_login_at,
+                   reset_token, reset_token_expires, created_at, updated_at`;
+
             const users = await query(
-                `SELECT * FROM users WHERE email = ?`,
+                `SELECT ${columns} FROM users WHERE email = ?`,
                 [email]
             );
 
@@ -213,11 +237,33 @@ class UnifiedUserService {
                 params.push(searchPattern, searchPattern, searchPattern);
             }
 
-            // カウント取得
-            const countSql = sql.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM');
-            const countResult = await query(countSql, params);
+            // -------------------------------------------------------
+            // カウントSQLは独立して構築する
+            // ⛔ 正規表現で SELECT ... FROM を置換する方法は
+            //    将来的にクエリが複雑化したときに壊れる危険がある
+            // ✅ WHERE 条件を共有するため params を流用する
+            // -------------------------------------------------------
+            let countSql = 'SELECT COUNT(*) as total FROM users WHERE organization_id = ?';
+            const countParams = [organizationId];
+
+            if (role) {
+                countSql += ' AND role = ?';
+                countParams.push(role);
+            }
+            if (status) {
+                countSql += ' AND status = ?';
+                countParams.push(status);
+            }
+            if (search) {
+                countSql += ' AND (name LIKE ? OR email LIKE ? OR identifier LIKE ?)';
+                const sp = `%${search}%`;
+                countParams.push(sp, sp, sp);
+            }
+
+            const countResult = await query(countSql, countParams);
             const total = countResult[0]?.total || 0;
 
+            // ページング用の ORDER / LIMIT / OFFSET を追加
             sql += ' ORDER BY name';
 
             if (limit) {
@@ -429,38 +475,132 @@ class UnifiedUserService {
     }
 
     /**
-     * 一括ユーザー登録（CSV等からのインポート用）
+     * 一括ユーザー登録（CSVインポート等）
+     *
+     * ⚡ パフォーマンス設計:
+     *   旧実装は for ループ内で createUser() を逐次呼び出しており、
+     *   N件のインポートで 2N クエリ（重複チェックSELECT + INSERT）が発生していた。
+     *   本実装では以下の最適化を行う:
+     *     1. 全メールアドレスを IN 句で一括チェック（1クエリ）
+     *     2. パスワードを並列ハッシュ化（Promise.all）
+     *     3. バルク INSERT で一括登録（1クエリ）
+     *   → 100件インポートでも合計3クエリで完了する
+     *
+     * @param {number} organizationId - 組織ID
+     * @param {Array<Object>} users   - 登録するユーザーデータ配列
+     * @param {string} [defaultRole='student'] - role 未指定時のデフォルト
+     * @returns {Promise<Object>} 登録結果（成功件数・失敗件数・エラー詳細）
      */
     static async bulkCreateUsers(organizationId, users, defaultRole = 'student') {
-        const results = {
-            success: 0,
-            failed: 0,
-            errors: []
-        };
+        const results = { success: 0, failed: 0, errors: [] };
+
+        if (!users || users.length === 0) {
+            return { success: true, message: '登録対象がありません', data: results };
+        }
+
+        // ── Step 1: 入力データの前処理とバリデーション ─────────────────
+        const validUsers = [];
+        const invalidEmails = new Set();
 
         for (const userData of users) {
-            const result = await this.createUser({
-                organization_id: organizationId,
-                email: userData.email,
-                password: userData.password || 'defaultPassword123',
-                name: userData.name,
-                role: userData.role || defaultRole,
-                identifier: userData.identifier || userData.student_id,
-                grade: userData.grade,
-                class_name: userData.class_name,
-                department: userData.department,
-                phone: userData.phone
-            });
+            if (!userData.email || !userData.name) {
+                results.failed++;
+                results.errors.push({
+                    email: userData.email || '(不明)',
+                    message: 'email と name は必須です'
+                });
+                continue;
+            }
+            validUsers.push(userData);
+        }
 
-            if (result.success) {
-                results.success++;
-            } else {
+        if (validUsers.length === 0) {
+            return {
+                success: true,
+                message: `${results.success}件登録、${results.failed}件失敗`,
+                data: results
+            };
+        }
+
+        // ── Step 2: 既存メールアドレスを一括チェック（1クエリ）──────────
+        const emails = validUsers.map(u => u.email);
+        const placeholders = emails.map(() => '?').join(',');
+        const existingEmailRows = await query(
+            `SELECT email FROM users WHERE email IN (${placeholders})`,
+            emails
+        );
+        const existingEmails = new Set(existingEmailRows.map(r => r.email));
+
+        // 重複メールをエラーに分類
+        const insertTargets = [];
+        for (const userData of validUsers) {
+            if (existingEmails.has(userData.email)) {
                 results.failed++;
                 results.errors.push({
                     email: userData.email,
-                    message: result.message
+                    message: 'このメールアドレスは既に登録されています'
                 });
+            } else {
+                insertTargets.push(userData);
             }
+        }
+
+        if (insertTargets.length === 0) {
+            return {
+                success: true,
+                message: `${results.success}件登録、${results.failed}件失敗`,
+                data: results
+            };
+        }
+
+        // ── Step 3: パスワードを並列ハッシュ化 ────────────────────────
+        const hashedList = await Promise.all(
+            insertTargets.map(u =>
+                bcrypt.hash(u.password || 'ChangeMe1234!', BCRYPT_ROUNDS)
+            )
+        );
+
+        // ── Step 4: バルク INSERT（1クエリ）────────────────────────────
+        // VALUES の各行を配列で作成し、プレースホルダーをまとめて生成する
+        const bulkValues = insertTargets.map((u, i) => [
+            organizationId,
+            u.email,
+            hashedList[i],
+            u.name,
+            u.role || defaultRole,
+            u.identifier || u.student_id || null,
+            u.department || null,
+            u.grade || null,
+            u.class_name || null,
+            u.phone || null
+        ]);
+
+        const rowPlaceholders = bulkValues.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+        const flatValues = bulkValues.flat();
+
+        try {
+            await query(
+                `INSERT INTO users
+                 (organization_id, email, password, name, role, identifier,
+                  department, grade, class_name, phone)
+                 VALUES ${rowPlaceholders}`,
+                flatValues
+            );
+
+            results.success += insertTargets.length;
+            logger.info('一括ユーザー登録完了', {
+                organizationId,
+                successCount: results.success,
+                failedCount: results.failed
+            });
+        } catch (insertError) {
+            // バルクINSERT 失敗時は全件エラーとして扱う
+            logger.error('一括ユーザー登録バルクINSERTエラー:', insertError.message);
+            results.failed += insertTargets.length;
+            results.errors.push({
+                email: '(一括登録)',
+                message: `バルクINSERTに失敗しました: ${insertError.message}`
+            });
         }
 
         return {
